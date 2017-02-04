@@ -16,48 +16,40 @@ extern "C" {
 }
 #endif
 
+// Network -- WiFi and MQTT configuration -----------------
+
 // WiFi setup
 
 const char* ssid = "Arkane Systems";
-const char* password = "VeryMuchNotMyRealWifiPassword";
+const char* password = "LauraFraser09";
 
 // MQTT server
 
-const char* mqttserver = "calmirie.arkane-systems.lan";
-const char* pubTopic = "sensors/dogtector";
-const char* subTopic = "enable/dogtector";
+const char* mqttserver = "ariadne.arkane-systems.lan";
+const char* subTopic = "dogtector/command";
+const char* pubStatusTopic = "dogtector/status";
+const char* pubAlertTopic = "dogtector/alert";
+const char* pubDoorTopic = "dogtector/door";
 
 // Create ESP8266 WiFiClient class to connect to the MQTT server
 WiFiClient wifiClient;
 
 PubSubClient client (wifiClient);
 
-// pins
+// Pins -- pin definitions --------------------------------
 
-int statusPin = 0;
-int detectPin = 2;
-int pirPin = 4;
-int speakerPin = 14;
+#define statusPin 0
+#define detectPin 2
+#define pirPin 4
+#define speakerPin 14
+#define doorPin 12
 
-// tickers
+// Tickers -- periodic calls to scanning routines ---------
 
-Ticker statusBlink;
+Ticker doorScan;
 Ticker pirScan;
-Ticker buzzer;
 
-// PIR scanner
-
-int pirState = LOW;           // assume no motion detected on start
-int reading = 0 ;             // temp reading used by scan()
-
-int skipFirst = 1;            // PIR always active on boot
-
-// buzzer
-
-int numTones = 2;
-int tones[] = {440, 300};
-
-int buzzState = 0;
+// Setup -- set up the Dogtector --------------------------
 
 void setup()
 {
@@ -72,6 +64,9 @@ void setup()
 
   // set up the PIR pin
   pinMode(pirPin, INPUT);
+
+  // set up the door pin
+  pinMode(doorPin, INPUT_PULLUP);
 
   // set up the WiFi
   wifi_station_set_hostname("iot-dogtector");
@@ -95,9 +90,16 @@ void setup()
   // Test buzzer.
   buzz();
 
+  // Enable door monitor.
+  enableDoorMonitor();
+
   // Enable detector.
   enableDetector();
 }
+
+// Loop -- run the MQTT loop forever ---------------------
+
+int enabled = 0;
 
 void loop()
 {
@@ -137,6 +139,7 @@ void MQTT_connect()
   }
 }
 
+// Process incoming MQTT messages.
 void MQTT_callback (char* topic, byte* payload, unsigned int length)
 {
   Serial.print("Received MQTT topic=");
@@ -149,6 +152,17 @@ void MQTT_callback (char* topic, byte* payload, unsigned int length)
   // check length
   if (length != 1)
     return;
+
+  // if we are asked for a status report, give it
+  if ((char)payload[0] == 'S')
+  {
+    Serial.println("status report");
+    if (enabled == 1)
+      client.publish(pubStatusTopic, "1");
+    else
+      client.publish(pubStatusTopic, "0");
+    return;
+  }
 
   if ((char)payload[0] == '0')
   {
@@ -167,86 +181,14 @@ void MQTT_callback (char* topic, byte* payload, unsigned int length)
   Serial.println("unknown enable, noop");
 }
 
-void enableDetector()
-{
-  pirScan.attach (1, scan);
+// Buzz -- sound piezo buzzer -----------------------------
 
-  setStatusEnabled();
-}
+Ticker buzzer;
 
-void disableDetector()
-{
-  pirScan.detach();
-  pirState = LOW;
-  reading = 0;
-  setDetectLedDisabled();
+int numTones = 2;
+int tones[] = {440, 300};
 
-  setStatusDisabled();
-}
-
-void scan ()
-{
-  reading = digitalRead (pirPin);
-
-  if (reading == HIGH)  // motion currently detected
-  {
-    if (pirState == LOW)  // motion not previously detected
-    {
-      // we have just turned on
-      pirState = HIGH;
-
-      if (!skipFirst)
-      {
-        setDetectLedEnabled();
-
-        // communicate this to the MQTT server
-        int result = client.publish (pubTopic, "1");
-        
-        Serial.print ("detect-publish");
-
-        buzz();
-      }
-    }
-  }
-  else // motion not detected
-  {
-    if (pirState == HIGH) // motion was previously detected
-    {
-      // we have just turned off
-      pirState = LOW ;
-      setDetectLedDisabled();
-
-      skipFirst = 0;
-    }
-  }
-}
-
-void setStatusEnabled ()
-{
-  statusBlink.attach (0.5, blink);
-}
-
-void setStatusDisabled ()
-{
-  statusBlink.detach();
-  digitalWrite(statusPin, LOW);
-}
-
-void setDetectLedEnabled ()
-{
-  digitalWrite(detectPin, LOW);
-}
-
-void setDetectLedDisabled ()
-{
-  digitalWrite(detectPin, HIGH);
-}
-
-void blink()
-{
-  int state = digitalRead(statusPin);
-  digitalWrite(statusPin, !state);
-}
+int buzzState = 0;
 
 void buzz()
 {
@@ -275,4 +217,142 @@ void buzz_impl ()
     buzzState = 0;
   }
 }
+
+// LED -- LED management ----------------------------------
+
+Ticker statusBlink;
+
+void setStatusEnabled ()
+{
+  statusBlink.attach (0.5, blink);
+}
+
+void setStatusDisabled ()
+{
+  statusBlink.detach();
+  digitalWrite(statusPin, LOW);
+}
+
+void setDetectLedEnabled ()
+{
+  digitalWrite(detectPin, LOW);
+}
+
+void setDetectLedDisabled ()
+{
+  digitalWrite(detectPin, HIGH);
+}
+
+void blink()
+{
+  int state = digitalRead(statusPin);
+  digitalWrite(statusPin, !state);
+}
+
+// Door -- check open/closed status of door ---------------
+
+int doorState = HIGH ;         // assume door closed on start
+int doorFirstPass = 1;
+
+void doorScanProc ()
+{
+  int reading = digitalRead (doorPin);
+
+//  Serial.print ("door reading: ");
+//  Serial.println (reading);
+
+  if (reading == HIGH) // door is open
+  {
+    if (doorState == LOW || doorFirstPass == 1) // door was previously closed, or first time through
+    {
+      // we have opened
+      doorState = HIGH ;
+
+      // communicate this to the MQTT server
+      int result = client.publish (pubDoorTopic, "1");
+      Serial.println ("door open");
+    }
+  }
+  else // door is closed
+  {
+    if (doorState == HIGH || doorFirstPass == 1) // door was previously open, or first time through
+    {
+      // we have closed
+      doorState = LOW ;
+
+      // communicate this to the MQTT server
+      int result = client.publish (pubDoorTopic, "0");
+      Serial.println ("door closed");
+    }
+  }
+
+  doorFirstPass = 0;
+}
+
+// PIR -- scan for dogs in the IR zone --------------------
+
+int pirState = LOW;           // assume no motion detected on start
+int skipFirst = 1;            // PIR always active on boot
+
+void pirScanProc ()
+{
+  int reading = digitalRead (pirPin);
+
+  if (reading == HIGH)  // motion currently detected
+  {
+    if (pirState == LOW)  // motion not previously detected
+    {
+      // we have just turned on
+      pirState = HIGH;
+
+      if (!skipFirst)
+      {
+        setDetectLedEnabled();
+
+        // communicate this to the MQTT server
+        int result = client.publish (pubAlertTopic, "1");
+        
+        Serial.println ("IR detect!");
+
+        buzz();
+      }
+    }
+  }
+  else // motion not detected
+  {
+    if (pirState == HIGH) // motion was previously detected
+    {
+      // we have just turned off
+      pirState = LOW ;
+      setDetectLedDisabled();
+
+      skipFirst = 0;
+    }
+  }
+}
+
+// Enable/Disable -- control dogtector functionality ------
+
+void enableDetector()
+{
+  pirScan.attach (1, pirScanProc);
+
+  setStatusEnabled();
+}
+
+void disableDetector()
+{
+  pirScan.detach();
+  pirState = LOW;
+  setDetectLedDisabled();
+
+  setStatusDisabled();
+}
+
+void enableDoorMonitor()
+{
+  doorScan.attach (1, doorScanProc);
+}
+
+
 
