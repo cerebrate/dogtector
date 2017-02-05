@@ -21,7 +21,7 @@ extern "C" {
 // WiFi setup
 
 const char* ssid = "Arkane Systems";
-const char* password = "LauraFraser09";
+const char* password = "VeryMuchNotMyRealWifiPassword";
 
 // MQTT server
 
@@ -337,6 +337,7 @@ void enableDetector()
 {
   pirScan.attach (1, pirScanProc);
 
+  enabled = 1;
   setStatusEnabled();
 }
 
@@ -346,6 +347,7 @@ void disableDetector()
   pirState = LOW;
   setDetectLedDisabled();
 
+  enabled = 0;
   setStatusDisabled();
 }
 
